@@ -1,87 +1,72 @@
 package uce.edu.ec.api.auth.interfaces;
 
+import java.time.Instant;
+import java.util.Set;
+ 
+import org.eclipse.microprofile.config.inject.ConfigProperty;
+
 import io.smallrye.jwt.build.Jwt;
-import jakarta.ws.rs.*;
+import jakarta.inject.Inject;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
+import jakarta.ws.rs.WebApplicationException;
 import jakarta.ws.rs.core.MediaType;
-import jakarta.ws.rs.core.Response;
+import uce.edu.ec.api.auth.aplication.UsuarioService;
 import uce.edu.ec.api.auth.domain.Usuario;
 
-import java.net.URI;
-import java.time.Duration;
-import java.util.*;
-
-@Path("/oauth")
+@Path("/auth")
 public class AuthResource {
-    
-    private static final Map<String, String> authCodes = new HashMap<>();
-    
-  
+
+    @Inject
+    private UsuarioService usuarioService;
+    // Inyectamos los valores del application.properties
+    @ConfigProperty(name = "auth.issuer")
+    String issuer;
+
+    @ConfigProperty(name = "auth.token.ttl")
+    Long ttl;
     @GET
-    @Path("/authorize")
-    @Produces(MediaType.APPLICATION_JSON)
-    public Response authorizeInfo() {
-        return Response.ok(Map.of(
-            "message", "Para autorizar, envíe un POST a /oauth/login con sus credenciales",
-            "required_fields", List.of("username", "password", "redirect_uri")
-        )).build();
-    }
+@Path("/token")
+@Produces(MediaType.APPLICATION_JSON)
+public TokenResponse token(
+        @QueryParam("username") String username, // Cambiado para coincidir con Postman y la BD
+        @QueryParam("password") String password) {
+
+    // Ahora pasamos la variable 'username' que recibimos del QueryParam
+    Usuario usuario = usuarioService.findByUsername(username);
     
-   
-    @POST
-    @Path("/login")
-    @Consumes(MediaType.APPLICATION_FORM_URLENCODED)
-    @Produces(MediaType.APPLICATION_JSON)
-    public Response login(
-            @FormParam("username") String username,
-            @FormParam("password") String password,
-            @FormParam("redirect_uri") String redirectUri) {
+    if (usuario != null && usuario.password.equals(password)) {
         
-        Usuario usuario = Usuario.findByUsername(username);
-        
-        if (usuario == null || !usuario.password.equals(password)) {
-            return Response.status(401)
-                    .entity(Map.of("error", "Credenciales inválidas"))
-                    .build();
-        }
-        
-        // Generar código
-        String code = UUID.randomUUID().toString();
-        authCodes.put(code, username);
-        
-        String redirectUrl = redirectUri + "?code=" + code;
-        return Response.seeOther(URI.create(redirectUrl)).build();
-    }
-    
-   
-    @POST
-    @Path("/token")
-    @Consumes(MediaType.APPLICATION_FORM_URLENCODED)
-    @Produces(MediaType.APPLICATION_JSON)
-    public Response getToken(
-            @FormParam("grant_type") String grantType,
-            @FormParam("code") String code,
-            @FormParam("client_id") String clientId) {
-        
-        String username = authCodes.get(code);
-        if (username == null) {
-            return Response.status(400)
-                    .entity(Map.of("error", "invalid_grant", "message", "Código inválido"))
-                    .build();
-        }
-        
-        authCodes.remove(code);
-        Usuario usuario = Usuario.findByUsername(username);
-        
-        String token = Jwt.issuer("matricula-auth")
+        Instant now = Instant.now();
+        Instant exp = now.plusSeconds(ttl);
+
+        String jwt = Jwt.issuer(issuer) 
                 .subject(usuario.username)
                 .groups(Set.of(usuario.rol))
-                .expiresIn(Duration.ofHours(1))
+                .issuedAt(now)
+                .expiresAt(exp)
                 .sign();
-        
-        return Response.ok(Map.of(
-                "access_token", token,
-                "token_type", "Bearer",
-                "expires_in", 3600
-        )).build();
+
+        return new TokenResponse(jwt, exp.getEpochSecond(), usuario.rol);
+    } else {
+        // Esto lanzará el error 401 que viste en Postman, pero con un mensaje claro
+        throw new WebApplicationException("Credenciales incorrectas", 401);
+    }
+}
+    // Clase interna para la respuesta JSON
+    public static class TokenResponse {
+        public String accessToken;
+        public long expiresAt;
+        public String role;
+
+        public TokenResponse() {}
+
+        public TokenResponse(String accessToken, long expiresAt, String role) {
+            this.accessToken = accessToken;
+            this.expiresAt = expiresAt;
+            this.role = role;
+        }
     }
 }
